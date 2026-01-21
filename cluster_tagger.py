@@ -1,93 +1,115 @@
 import pandas as pd
-import re
-from transformers import pipeline
+import math
+from openai import OpenAI  # 适配 DeepSeek, Kimi, GPT 等所有兼容 OpenAI 协议的模型
 
-def anonymize_companies(df: pd.DataFrame, col_name: str) -> pd.DataFrame:
+class LLMKeywordExtractor:
     """
-    仅针对【公司名】进行高精度脱敏（保留地名）。
-    策略：正则表达式 (处理规范全称) + NER (处理漏网之鱼)
-    """
+    LLM 关键词提取器
     
-    # 1. 加载模型 (只做查漏补缺用)
-    print("正在加载 NER 模型...")
-    try:
-        ner_pipeline = pipeline(
-            "token-classification", 
-            model="shibing624/bert4ner-base-chinese",
-            aggregation_strategy="simple",
-            device=-1 # 有显卡改 0
-        )
-    except Exception as e:
-        print(f"模型加载失败: {e}")
+    功能：
+    1. 按簇随机抽取 10% 数据。
+    2. 利用大模型 API 归纳提取核心业务关键词。
+    """
+
+    def __init__(self, api_key: str, base_url: str, model: str = "deepseek-chat"):
+        """
+        Args:
+            api_key: 模型 API Key
+            base_url: 模型 API 地址 (如 https://api.deepseek.com)
+            model: 模型名称
+        """
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.model = model
+
+    def extract_keywords(self, df: pd.DataFrame, text_col: str, cluster_col: str = 'Cluster') -> pd.DataFrame:
+        """
+        执行提取流程
+        
+        Args:
+            df: 包含聚类结果的 DataFrame
+            text_col: 文本列名 (建议使用脱敏后的列)
+            cluster_col: 聚类 ID 列名
+            
+        Returns:
+            pd.DataFrame: 新增了 'LLM_Keywords' 列的 DataFrame
+        """
+        print(f"🤖 [LLM] 开始对 {len(df[cluster_col].unique())} 个聚类进行关键词提取...")
+        
+        # 1. 准备结果字典 {cluster_id: keywords}
+        cluster_keywords_map = {}
+        
+        # 2. 获取所有有效簇 (排除噪音 -1，或者你也想处理噪音?)
+        # 通常建议排除 -1，因为噪音里没有共性
+        unique_clusters = sorted(df[cluster_col].unique())
+        if -1 in unique_clusters:
+            unique_clusters.remove(-1)
+            cluster_keywords_map[-1] = "噪音数据/杂项"
+
+        # 3. 遍历每个簇
+        for cid in unique_clusters:
+            # 获取该簇所有数据
+            cluster_data = df[df[cluster_col] == cid]
+            total_count = len(cluster_data)
+            
+            # --- 核心逻辑：随机抽取 10% ---
+            # math.ceil 向上取整，保证至少有 1 条
+            sample_size = math.ceil(total_count * 0.1)
+            
+            # 设定上限（可选）：如果一个类有 1万条，10%就是1000条，这会把 Token 撑爆且费钱
+            # 建议加个硬顶，比如最多取 50 条，这足够代表性了
+            sample_size = min(sample_size, 50) 
+            
+            sampled_texts = cluster_data[text_col].sample(n=sample_size, random_state=42).tolist()
+            
+            print(f"   - Processing Cluster {cid} (Total: {total_count}, Sampled: {sample_size})...")
+            
+            # 4. 调用 LLM
+            keywords = self._call_llm_api(sampled_texts)
+            cluster_keywords_map[cid] = keywords
+            
+        # 5. 回填结果
+        # 使用 map 函数将字典值映射回 DataFrame
+        df['LLM_Keywords'] = df[cluster_col].map(cluster_keywords_map)
+        
+        print("✅ 关键词提取完成！")
         return df
 
-    # 2. 定义【强规则】正则表达式
-    # 你的数据很规范，这行代码能解决 90% 的问题，且 0 误判
-    # 匹配模式：(任意非标点字符 2个以上) + (特定的公司后缀)
-    # 排除掉“有限公司”单独出现的情况
-    company_regex = re.compile(r'([\u4e00-\u9fa5]{2,30}(?:公司|分公司|支行|厂|合作社|经营部|商行|超市|酒店|饭店|中心))')
+    def _call_llm_api(self, texts: list) -> str:
+        """
+        [Private] 构造 Prompt 并调用 API
+        """
+        # 拼接文本，用换行符分隔
+        context_str = "\n".join([f"- {t}" for t in texts])
+        
+        # --- Prompt 设计 ---
+        # 技巧：指定输出格式，禁止废话
+        prompt = f"""
+你是一名资深的税务数据分析师。以下是从某类税务咨询工单中随机抽取的若干条记录。
+请分析这些文本的共同主题，提取 3-5 个核心业务关键词。
 
-    def process_text(text):
-        if not isinstance(text, str) or not text.strip():
-            return ""
+要求：
+1. 关键词必须精准概括核心业务实体或动作（如：个税APP, 申报失败, 密码重置）。
+2. 不要包含“咨询”、“纳税人”、“问题”等无意义的通用词。
+3. 直接输出关键词，用逗号分隔。不要输出任何解释性文字。
 
-        # --- Step 1: 正则暴力替换 (高可信度) ---
-        # 比如 "日照钢铁有限公司" -> "<企业>"
-        # 这一步非常快，而且绝对不会误杀 "上海" (地名)
-        text = company_regex.sub('<企业>', text)
+样本数据：
+{context_str}
 
-        # --- Step 2: NER 查漏补缺 (处理没带后缀的) ---
-        # 此时剩下的 text 里，大部分规范公司名已经被换掉了，NER 只需要处理剩下的难点
+关键词：
+"""
         try:
-            entities = ner_pipeline(text)
-        except:
-            return text
-
-        # 倒序替换，防止索引错位
-        # 过滤：只处理 ORG (公司)，忽略 LOC (地名) 和 PER (人名)
-        # 补充：建议把 PER 也加上，防止 NER 把某些公司名误判为人名，反正你也不关心人名
-        target_entities = [e for e in entities if e['entity_group'] in ['ORG']] 
-        
-        sorted_entities = sorted(target_entities, key=lambda x: x['start'], reverse=True)
-        
-        for ent in sorted_entities:
-            start, end = ent['start'], ent['end']
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一个只输出结果的关键词提取机器。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1, # 低温度，保证结果稳定
+                max_tokens=50    # 限制输出长度，省钱
+            )
+            return response.choices[0].message.content.strip()
             
-            # 双重检查：如果 NER 识别出来的东西已经被正则替换成了 <企业>，就跳过
-            # 防止出现 <<企业>> 这种嵌套
-            if "<企业>" in text[start:end]:
-                continue
-                
-            # 执行替换
-            text = text[:start] + "<企业>" + text[end:]
-            
-        return text
+        except Exception as e:
+            print(f"❌ API 调用失败: {e}")
+            return "提取失败"
 
-    print(f"正在处理 {len(df)} 条数据...")
-    
-    # 批量处理
-    # 注意：因为引入了正则，这里没法直接用 pipeline 的 batch_size，只能逐条处理
-    # 但因为正则过滤了大部分长度，速度不会太慢
-    new_texts = []
-    for t in df[col_name]:
-        new_texts.append(process_text(t))
-        
-    output_col = f"{col_name}_sanitized"
-    df[output_col] = new_texts
-    print("✅ 处理完成！")
-    return df
-
-# 使用示例
-if __name__ == "__main__":
-    df_test = pd.DataFrame({
-        'content': [
-            "日照钢铁控股集团有限公司咨询环保税。", # 规范名，正则能抓到
-            "张三在上海分公司工作。", # "上海分公司" 正则能抓到，"上海" 不会被动
-            "腾讯和阿里是互联网巨头。", # 不规范名（无后缀），正则抓不到，NER 补刀
-            "去北京出差。", # 地名，完全保留
-            "老王馒头店开票报错。" # 个体户，正则能抓到
-        ]
-    })
-    
-    res = anonymize_companies_only(df_test, 'content')
-    print(res['content_sanitized'])
