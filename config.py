@@ -1,0 +1,6 @@
+EXCEL_PATH = r"D:\tax\诉求分析25年\【省局导出】2025年全市12366工单.xls"
+SAVE_PATH = r"D:\tax\诉求分析25年\【省局导出】2025年全市12366工单.xls"
+OUTPUT_DIR = r"D:\tax\诉求分析25年\OUTPUT\test3.xlsx"
+EMBEDDING_MODEL_NAME = "BAAI/bge-large-zh-v1.5"
+DATA_COLUMN = "Extracted Content"
+STATE_FILE = r"D:\tax\诉求分析25年\OUTPUT\tax_analysis_checkpoint2.pkl"
