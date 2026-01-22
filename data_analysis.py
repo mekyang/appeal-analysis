@@ -36,7 +36,8 @@ class TaxClusteringEngine:
         self.results_df = None        # 最终结果表
         
     def run_analysis(self, 
-                     texts: List[str], 
+                     texts: List[str],
+                     original: Optional[List[Union[int, str]]] = None, 
                      n_neighbors: int = 15, 
                      n_components: int = 5, 
                      min_cluster_size: int = 10,
@@ -46,6 +47,7 @@ class TaxClusteringEngine:
 
         Args:
             texts (List[str]): 已经预处理好的文本列表（List of strings）。
+            original (List[Union[int, str]]): 原始数据的 ID 列表（如 Trace_ID）。
             n_neighbors (int): UMAP 参数。控制局部结构，越小越关注细节。建议 10-30。
             n_components (int): UMAP 参数。降维后的维度数，HDBSCAN 推荐 5-10。
             min_cluster_size (int): HDBSCAN 参数。最小成团数量，小于此数量视为噪音。
@@ -56,6 +58,9 @@ class TaxClusteringEngine:
         """
         if not texts:
             raise ValueError("输入文本列表不能为空！")
+        
+        if original is not None and len(texts) != len(original):
+            raise ValueError(f"文本数量 ({len(texts)}) 与 原始数据 数量 ({len(original)}) 不一致！")
 
         print(f"🚀 开始分析 {len(texts)} 条数据...")
 
@@ -69,7 +74,7 @@ class TaxClusteringEngine:
         self._perform_clustering(min_cluster_size)
 
         # 4. 结果整合与关键词提取
-        self._generate_final_report(texts, keyword_top_n)
+        self._generate_final_report(texts, keyword_top_n, original)
 
         print("✅ 分析流程结束。")
         return self.results_df
@@ -174,13 +179,23 @@ class TaxClusteringEngine:
             
         return keywords_dict
 
-    def _generate_final_report(self, texts: List[str], keyword_top_n: int) -> None:
+    def _generate_final_report(self, texts: List[str], keyword_top_n: int, original: Optional[List] = None) -> None:
         """
         [Private] 组装最终的 DataFrame。
         结果存储于 self.results_df
         """
         # 创建临时 DataFrame
-        df = pd.DataFrame({'Text': texts, 'Cluster': self._labels})
+        data = {
+            'Text': texts, 
+            'Cluster': self._labels
+        }
+        
+        # 如果传入了 ID，则添加到字典中
+        if original is not None:
+            data['Trace_ID'] = original
+            
+        # 创建 DataFrame
+        df = pd.DataFrame(data)
         
         # 提取关键词字典
         keywords_map = self._extract_cluster_keywords(df, keyword_top_n)
@@ -278,7 +293,11 @@ class TaxClusteringEngine:
         # 为了生成报告，我们需要原始文本。如果 results_df 还在，可以直接取
         if self.results_df is not None:
             texts = self.results_df['Text'].tolist()
-            self._generate_final_report(texts, keyword_top_n)
+            original = None
+            if 'Original_Content' in self.results_df.columns:
+                original = self.results_df['Original_Content'].tolist()
+            
+            self._generate_final_report(texts, keyword_top_n, original)
         else:
             print("⚠️ 警告：缺少原始文本，无法生成关键词报告，仅更新了聚类标签。")
 
