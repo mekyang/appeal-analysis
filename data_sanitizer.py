@@ -86,7 +86,7 @@ class TaxDataSanitizer:
 
         # 筛选出 ORG (机构)，忽略 LOC (地名) 和 PER (人名)
         # 如果你希望把人名也替换，可以在列表里加上 'PER'，并修改 replacement
-        target_entities = [e for e in entities if e['entity_group'] == 'ORG']
+        target_entities = [e for e in entities if e['entity_group'] in ['ORG', 'PER']]
         
         # 倒序替换
         sorted_entities = sorted(target_entities, key=lambda x: x['start'], reverse=True)
@@ -101,11 +101,17 @@ class TaxDataSanitizer:
             if '<' in span and '>' in span:
                 continue
             
+            entity_type = ent['entity_group']
+            
+            if entity_type == 'ORG':
+                replacement = '<企业名>'
+            elif entity_type == 'PER':
+                replacement = '<人名>'
             # 执行替换
-            text = text[:start] + '<企业名>' + text[end:]
+            text = text[:start] + replacement + text[end:]
         
         return text
-
+       
     def process_dataframe(self, df, col_name, output_col=None):
         """批量处理 DataFrame"""
         print(f"正在处理 {len(df)} 条数据...")

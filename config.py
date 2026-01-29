@@ -1,5 +1,5 @@
 EXCEL_PATH = r"D:\tax\诉求分析25年\【省局导出】2025年全市12366工单.xls"
-SAVE_PATH = r"D:\tax\诉求分析25年\output_2025年全市12366工单.xlsx"
+SAVE_PATH = r"D:\tax\诉求分析25年\output_12366.xlsx"
 OUTPUT_DIR = r"D:\tax\诉求分析25年\OUTPUT\test5.xlsx"
 FINAL_DIR = r"D:\tax\诉求分析25年\OUTPUT\最终结果4.xlsx"
 EMBEDDING_MODEL_NAME = "BAAI/bge-large-zh-v1.5"
