@@ -1,0 +1,16 @@
+{
+    "EXCEL_PATH": "D:\\tax\\诉求分析25年\\【省局导出】2025年全市12366工单.xls",
+    "SAVE_PATH": "D:\\tax\\诉求分析25年\\output_12366.xlsx",
+    "STATE_FILE": "D:\\tax\\诉求分析25年\\OUTPUT\\tax_analysis_checkpoint5.pkl",
+    "OUTPUT_DIR": "D:\\tax\\诉求分析25年\\OUTPUT",
+    "EMBEDDING_MODEL": "BAAI/bge-large-zh-v1.5",
+    "LLM_API_KEY": "",
+    "LLM_BASE_URL": "https://api.deepseek.com",
+    "EXTRACTOR_TYPE": "12366工单提取器",
+    "COL_NAME": "业务内容",
+    "USE_NER": true,
+    "N_NEIGHBORS": 15,
+    "MIN_CLUSTER_SIZE": 10,
+    "KEYWORD_TOP_N": 5,
+    "MERGE_THRESHOLD": 0.92
+}
