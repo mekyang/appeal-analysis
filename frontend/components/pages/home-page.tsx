@@ -163,24 +163,61 @@ export function HomePage({ onNavigate }: HomePageProps) {
     setPreprocessResult(null);
     setClusterResult(null);
     setKeywordsResult(null);
-    setRealClusteredFilename(null);
-    setRealKeywordsFilename(null);
+    
+    let intervalId: NodeJS.Timeout | null = null;
+    const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 
     try {
-      setStep1Progress(15);
+      setStep1Progress(5);
       setStep1ProgressText("正在上传文件...");
-      await new Promise((r) => setTimeout(r, 300));
-      setStep1Progress(40);
-      setStep1ProgressText(`正在使用提取器处理数据...`);
+      
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("extractor_type", cleanCfg.extractor);
+      formData.append("use_ner", String(cleanCfg.useNer));
+      formData.append("column_name", cleanCfg.column);
 
-      const res = await preprocessFile(file, cleanCfg.extractor, cleanCfg.useNer, cleanCfg.column);
+      const startRes = await fetch(`${API_BASE}/api/preprocess`, {
+        method: "POST",
+        body: formData,
+      });
 
-      setStep1Progress(100);
-      setStep1ProgressText("处理完成");
-      setPreprocessResult(res);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "数据处理失败");
-    } finally {
+      if (!startRes.ok) throw new Error("启动清洗任务失败");
+      const { task_id } = await startRes.json();
+      console.log("Step 1 Task ID:", task_id);
+
+      // 轮询
+      return new Promise<void>((resolve, reject) => {
+        intervalId = setInterval(async () => {
+          try {
+            const pollRes = await fetch(`${API_BASE}/api/progress/${task_id}`);
+            if (!pollRes.ok) return;
+            const data = await pollRes.json();
+
+            if (data.progress) setStep1Progress(data.progress);
+            if (data.msg) setStep1ProgressText(data.msg);
+
+            if (data.status === "done") {
+              if (intervalId) clearInterval(intervalId);
+              setStep1Progress(100);
+              setStep1ProgressText("清洗完成");
+              setPreprocessResult(data.result); // 设置结果
+              setStep1Loading(false);
+              resolve();
+            } else if (data.status === "error") {
+              if (intervalId) clearInterval(intervalId);
+              throw new Error(data.error);
+            }
+          } catch (e) {
+            if (intervalId) clearInterval(intervalId);
+            reject(e);
+          }
+        }, 1000);
+      });
+
+    } catch (err: any) {
+      if (intervalId) clearInterval(intervalId);
+      setError(err.message || "处理失败");
       setStep1Loading(false);
     }
   };
@@ -194,44 +231,103 @@ export function HomePage({ onNavigate }: HomePageProps) {
     setKeywordsResult(null);
     setRealKeywordsFilename(null);
 
+    // 定义定时器变量，方便后面清理
+    let intervalId: NodeJS.Timeout | null = null;
+    const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+
     try {
       setStep2Progress(10);
       setStep2ProgressText("正在下载预处理文件...");
 
+      // 1. 下载文件 (保持不变)
       const blob = await downloadFile(processedFilename);
       const processedFile = new File([blob], processedFilename, {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
 
-      setStep2Progress(30);
-      setStep2ProgressText("SBERT 编码 + HDBSCAN 聚类中...");
+      setStep2Progress(20);
+      setStep2ProgressText("正在上传并启动聚类任务...");
 
-      const res = await clusterData(
-        processedFile,
-        clusterCfg.textColumn,
-        clusterCfg.originalColumn,
-        clusterCfg.nNeighbors,
-        clusterCfg.nComponents,
-        clusterCfg.minCluster,
-        clusterCfg.topN,
-        true
-      );
+      // 2. 手动构建请求 (替代原来的 clusterData 调用)
+      const formData = new FormData();
+      formData.append("file", processedFile);
+      formData.append("text_column", clusterCfg.textColumn);
+      formData.append("original_column", clusterCfg.originalColumn);
+      formData.append("n_neighbors", String(clusterCfg.nNeighbors));
+      formData.append("n_components", String(clusterCfg.nComponents));
+      formData.append("min_cluster_size", String(clusterCfg.minCluster));
+      formData.append("keyword_top_n", String(clusterCfg.topN));
+      formData.append("auto_save", "true");
 
-      setStep2Progress(100);
-      setStep2ProgressText("聚类完成");
-      
-      if (res && (res as any).output_file) {
-        const fullPath = (res as any).output_file as string;
-        const realName = fullPath.split(/[/\\]/).pop();
-        if (realName) {
-            setRealClusteredFilename(realName);
-        }
+      // 3. 发送启动请求 (对应后端 main.py 的改造)
+      const startRes = await fetch(`${API_BASE}/api/cluster`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!startRes.ok) {
+        const errData = await startRes.json();
+        throw new Error(errData.detail || "启动任务失败");
       }
-      
-      setClusterResult(res);
+
+      // 4. 拿到任务 ID
+      const { task_id } = await startRes.json();
+      console.log("任务已启动，Task ID:", task_id);
+
+      // 5. 开始轮询 (每 1 秒查一次)
+      return new Promise<void>((resolve, reject) => {
+        intervalId = setInterval(async () => {
+          try {
+            const pollRes = await fetch(`${API_BASE}/api/progress/${task_id}`);
+            if (!pollRes.ok) return; // 网络抖动暂时忽略
+
+            const statusData = await pollRes.json();
+
+            // A. 更新进度条 (显示真实的后端进度！)
+            if (statusData.progress) {
+                setStep2Progress(statusData.progress);
+            }
+            // B. 更新状态文字 (显示后端传回的 msg)
+            if (statusData.msg) {
+                setStep2ProgressText(statusData.msg);
+            }
+
+            // C. 判断是否完成
+            if (statusData.status === "done") {
+              if (intervalId) clearInterval(intervalId); // 停止轮询
+              
+              // 处理结果数据
+              const res = statusData.result;
+              setStep2Progress(100);
+              setStep2ProgressText("聚类完成");
+
+              // 处理文件名 (保持你原来的逻辑)
+              if (res && res.output_file) {
+                const fullPath = res.output_file as string;
+                const realName = fullPath.split(/[/\\]/).pop();
+                if (realName) setRealClusteredFilename(realName);
+              }
+
+              setClusterResult(res);
+              setStep2Loading(false);
+              resolve(); // 结束 Promise
+            } 
+            // D. 判断是否出错
+            else if (statusData.status === "error") {
+              if (intervalId) clearInterval(intervalId);
+              throw new Error(statusData.error || "任务执行出错");
+            }
+          } catch (pollErr) {
+            // 轮询中的错误也需要捕获
+            if (intervalId) clearInterval(intervalId);
+            reject(pollErr);
+          }
+        }, 1000); // 1秒轮询一次
+      });
+
     } catch (err: unknown) {
+      if (intervalId) clearInterval(intervalId); // 确保出错也清除定时器
       setError(err instanceof Error ? err.message : "聚类分析失败");
-    } finally {
       setStep2Loading(false);
     }
   };
@@ -243,7 +339,6 @@ export function HomePage({ onNavigate }: HomePageProps) {
         setError("无法找到聚类文件，请重新执行第二步");
         return;
     }
-
     if (!llmCfg.apiKey) {
       setLlmDialogOpen(true);
       return;
@@ -252,35 +347,73 @@ export function HomePage({ onNavigate }: HomePageProps) {
     setError(null);
     setKeywordsResult(null);
 
+    let intervalId: NodeJS.Timeout | null = null;
+    const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+
     try {
-      setStep3Progress(15);
-      setStep3ProgressText("正在下载聚类文件...");
+      setStep3Progress(5);
+      setStep3ProgressText("准备上传...");
 
       const blob = await downloadFile(targetFilename);
       const clusterFile = new File([blob], targetFilename, {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
 
-      setStep3Progress(40);
-      setStep3ProgressText("AI 正在阅读并生成标签 (请稍候)...");
+      const formData = new FormData();
+      formData.append("file", clusterFile);
+      formData.append("api_key", llmCfg.apiKey);
+      formData.append("base_url", llmCfg.baseUrl);
+      formData.append("text_col", "Text"); // 注意这里列名
 
-      const res = await extractKeywords(clusterFile, llmCfg.apiKey, llmCfg.baseUrl, "Text");
+      const startRes = await fetch(`${API_BASE}/api/extract-keywords`, {
+        method: "POST",
+        body: formData,
+      });
 
-      setStep3Progress(100);
-      setStep3ProgressText("摘要生成完成");
-      
-      if (res && (res as any).output_file) {
-        const fullPath = (res as any).output_file as string;
-        const realName = fullPath.split(/[/\\]/).pop();
-        if (realName) {
-            setRealKeywordsFilename(realName);
-        }
-      }
+      if (!startRes.ok) throw new Error("启动摘要任务失败");
+      const { task_id } = await startRes.json();
+      console.log("Step 3 Task ID:", task_id);
 
-      setKeywordsResult(res);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "LLM 调用失败");
-    } finally {
+      // 轮询
+      return new Promise<void>((resolve, reject) => {
+        intervalId = setInterval(async () => {
+          try {
+            const pollRes = await fetch(`${API_BASE}/api/progress/${task_id}`);
+            if (!pollRes.ok) return;
+            const data = await pollRes.json();
+
+            if (data.progress) setStep3Progress(data.progress);
+            if (data.msg) setStep3ProgressText(data.msg);
+
+            if (data.status === "done") {
+              if (intervalId) clearInterval(intervalId);
+              setStep3Progress(100);
+              setStep3ProgressText("摘要生成完毕");
+              
+              const res = data.result;
+              if (res && res.output_file) {
+                 const fullPath = res.output_file as string;
+                 const realName = fullPath.split(/[/\\]/).pop();
+                 if (realName) setRealKeywordsFilename(realName);
+              }
+
+              setKeywordsResult(res);
+              setStep3Loading(false);
+              resolve();
+            } else if (data.status === "error") {
+              if (intervalId) clearInterval(intervalId);
+              throw new Error(data.error);
+            }
+          } catch (e) {
+            if (intervalId) clearInterval(intervalId);
+            reject(e);
+          }
+        }, 1000);
+      });
+
+    } catch (err: any) {
+      if (intervalId) clearInterval(intervalId);
+      setError(err.message || "LLM 调用失败");
       setStep3Loading(false);
     }
   };
